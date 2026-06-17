@@ -1,7 +1,7 @@
-numpy==1.24.4
-opencv-python==4.13.0.92
-pillow==10.4.0
-scikit-learn==1.3.2
-tensorboard==2.14.0
-torch==2.4.1
-torchvision==0.19.1
+numpy
+opencv-python
+pillow
+scikit-learn
+tensorboard
+torch
+torchvision
