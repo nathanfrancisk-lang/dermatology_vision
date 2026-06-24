@@ -21,12 +21,9 @@ BINARY_LABEL_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'sd198_train_bina
 ORIGINAL_LABEL_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'sd198_train_original_label.txt')
 
 def is_eczema_target(class_name):
-    # TODO: what other keywords should we search for?
-    keywords = ["eczema"]
-
-    # TODO: return true when the class name contains any of the keywords
-
-    return False
+    keywords = ["eczema", "atopic dermatitis"]
+    class_lower = class_name.lower()
+    return any(keyword in class_lower for keyword in keywords)
 
 def setup_dataset_sd198(root_dir, output_dir):
     '''
