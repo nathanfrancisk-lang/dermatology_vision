@@ -4,9 +4,9 @@ export CUDA_VISIBLE_DEVICES=0
 
 python src/run_eczema_binary_classification.py \
 --image_paths_file \
-    testing\dermnet\dermnet_test_binary_image_paths.txt \
+    testing/dermnet/dermnet_test_image.txt \
 --labels_file \
-    testing\dermnet\dermnet_test_binary_label.txt \
+    testing/dermnet/dermnet_test_binary_label.txt \
 --checkpoint_path \
     checkpoints/eczema_binary_resnet50/model-best.pth \
 --batch_size 32 \

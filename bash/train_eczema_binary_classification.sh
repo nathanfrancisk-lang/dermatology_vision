@@ -4,17 +4,17 @@ export CUDA_VISIBLE_DEVICES=0
 
 python src/train_eczema_binary_classification.py \
 --train_image_paths_file \
-    training\dermnet\dermnet_train_image.txt \
-    training\fitzpatrick17k\fitzpatrick17k_train_image.txt \
-    training\sd198\sd198_train_image.txt \
+    training/dermnet/dermnet_train_image.txt \
+    training/fitzpatrick17k/fitzpatrick17k_train_image.txt \
+    training/sd198/sd198_train_image.txt \
 --train_labels_file \
-    training\dermnet\dermnet_train_binary_label.txt \
-    training\fitzpatrick17k\fitzpatrick17k_train_binary_label.txt \
-    training\sd198\sd198_train_binary_label.txt \
+    training/dermnet/dermnet_train_binary_label.txt \
+    training/fitzpatrick17k/fitzpatrick17k_train_binary_label.txt \
+    training/sd198/sd198_train_binary_label.txt \
 --val_image_paths_file \
-    testing\dermnet\dermnet_test_binary_image_paths.txt \
+    testing/dermnet/dermnet_test_image.txt \
 --val_labels_file \
-    testing\dermnet\dermnet_test_binary_label.txt \
+    testing/dermnet/dermnet_test_binary_label.txt \
 --batch_size 32 \
 --n_height 224 \
 --n_width 224 \
