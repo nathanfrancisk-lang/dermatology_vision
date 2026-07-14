@@ -77,8 +77,9 @@ def setup_dataset_sd198(root_dir, output_dir):
                 data_format='HWC'
             )
 
-            # Store absolute paths for the dataloader
-            train_image_paths.append(os.path.abspath(image_path))
+            # Store relative paths with forward slashes for the dataloader
+            rel_path = os.path.relpath(image_path).replace('\\', '/')
+            train_image_paths.append(rel_path)
             train_binary_labels.append(binary_label)
             train_original_labels.append(class_name)
 

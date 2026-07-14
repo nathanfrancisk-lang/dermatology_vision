@@ -108,8 +108,9 @@ def setup_dataset_fitzpatrick17k(root_dir, output_dir):
 
         binary_label = "1" if is_eczema_target(label) else "0"
 
-        # Store absolute paths for the dataloader
-        train_image_paths.append(os.path.abspath(image_path))
+        # Store relative paths with forward slashes for the dataloader
+        rel_path = os.path.relpath(image_path).replace('\\', '/')
+        train_image_paths.append(rel_path)
         train_binary_labels.append(binary_label)
         train_original_labels.append(label)
 

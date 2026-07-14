@@ -74,8 +74,9 @@ def process_split(split_dir, img_out_dir, global_img_idx):
                 data_format='HWC'
             )
 
-            # Store absolute paths for the dataloader
-            image_paths.append(os.path.abspath(image_path))
+            # Store relative paths with forward slashes for the dataloader
+            rel_path = os.path.relpath(image_path).replace('\\', '/')
+            image_paths.append(rel_path)
             binary_labels.append(binary_label)
             original_labels.append(class_name)
 
