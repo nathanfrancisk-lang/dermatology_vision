@@ -142,3 +142,196 @@ def save_image(image, path, normalized=True, data_type='color', data_format='HWC
         raise ValueError('Unsupported data type: {}'.format(data_type))
 
     image.save(path)
+
+def resize(T, shape, interp_type='lanczos', data_format='HWC', lib_type='cv2'):
+    '''
+    Resizes a tensor
+    Args:
+        T : numpy
+            tensor to resize
+        shape : tuple[int]
+            (height, width) to resize tensor
+        interp_type : str
+            interpolation for resize
+        data_format : str
+            'CHW', or 'HWC', 'CDHW', 'DHWC'
+    Returns:
+        numpy : image resized to height and width
+    '''
+    if shape is None or any([x is None or x <= 0 for x in shape]):
+        return T
+
+    n_height, n_width = shape
+
+    if lib_type == 'cv2':
+        resize_shape = (n_width, n_height)
+
+        resize_func = cv2.resize
+
+        if interp_type == 'nearest':
+            interp_type = cv2.INTER_NEAREST
+        elif interp_type == 'area':
+            interp_type = cv2.INTER_AREA
+        elif interp_type == 'bilinear':
+            interp_type = cv2.INTER_LINEAR
+        elif interp_type == 'lanczos':
+            interp_type = cv2.INTER_LANCZOS4
+        else:
+            raise ValueError('Unsupport interpolation type: {} for library {}'.format(interp_type, lib_type))
+
+    elif lib_type == 'pil':
+        resize_shape = (n_height, n_width)
+
+        def pil_resize(R, shape, interpolation=None):
+            R = Image.fromarray(np.uint8(R))
+
+            # Resize and transpose back to CHW
+            R = transforms.functional.resize(R, shape, interpolation=interpolation)
+
+            R = np.array(R).astype(np.float32)
+
+            return R
+
+        resize_func = pil_resize
+
+        if interp_type == 'nearest':
+            interp_type = transforms.InterpolationMode.NEAREST
+        elif interp_type == 'bilinear':
+            interp_type = transforms.InterpolationMode.BILINEAR
+        elif interp_type == 'lanczos':
+            interp_type = transforms.InterpolationMode.LANCZOS
+        else:
+            raise ValueError('Unsupport interpolation type: {} for library {}'.format(interp_type, lib_type))
+
+    # Resize tensor
+    if data_format == 'CHW':
+        # Tranpose from CHW to HWC
+        R = np.transpose(T, (1, 2, 0))
+
+        # Resize and transpose back to CHW
+        R = resize_func(R, resize_shape, interpolation=interp_type)
+
+        R = np.reshape(R, (n_height, n_width, T.shape[0]))
+        R = np.transpose(R, (2, 0, 1))
+
+    elif data_format == 'HWC':
+        R = resize_func(T, resize_shape, interpolation=interp_type)
+        R = np.reshape(R, (n_height, n_width, T.shape[2]))
+
+    elif data_format == 'CDHW':
+        # Transpose CDHW to DHWC
+        D = np.transpose(T, (1, 2, 3, 0))
+
+        # Resize and transpose back to CDHW
+        R = np.zeros((D.shape[0], n_height, n_width, D.shape[3]))
+
+        for d in range(R.shape[0]):
+            r = resize_func(D[d, ...], resize_shape, interpolation=interp_type)
+            R[d, ...] = np.reshape(r, (n_height, n_width, D.shape[3]))
+
+        R = np.transpose(R, (3, 0, 1, 2))
+
+    elif data_format == 'DHWC':
+        R = np.zeros((T.shape[0], n_height, n_width, T.shape[3]))
+        for d in range(R.shape[0]):
+            r = resize_func(T[d, ...], resize_shape, interpolation=interp_type)
+            R[d, ...] = np.reshape(r, (n_height, n_width, T.shape[3]))
+
+    else:
+        raise ValueError('Unsupport data format: {}'.format(data_format))
+
+    return R
+
+def random_crop(inputs, shape, intrinsics=None, crop_type=['none']):
+    '''
+    Apply crop to inputs e.g. images, depth and if available adjust camera intrinsics
+
+    Arg(s):
+        inputs : list[numpy[float32]]
+            list of numpy arrays e.g. images, depth, and validity maps
+        shape : list[int]
+            shape (height, width) to crop inputs
+        intrinsics : list[numpy[float32]]
+            list of 3 x 3 camera intrinsics matrix
+        crop_type : str
+            none, horizontal, vertical, anchored, bottom
+    Return:
+        list[numpy[float32]] : list of cropped inputs
+        list[numpy[float32]] : if given, 3 x 3 adjusted camera intrinsics matrix
+    '''
+
+    n_height, n_width = shape
+    _, o_height, o_width = inputs[0].shape
+
+    n_height = o_height if n_height == 0 else n_height
+    n_width = o_width if n_width == 0 else n_width
+
+    # Get delta of crop and original height and width
+    d_height = o_height - n_height
+    d_width = o_width - n_width
+
+    # By default, perform center crop
+    y_start = d_height // 2
+    x_start = d_width // 2
+
+    if 'horizontal' in crop_type:
+
+        # Select from one of the pre-defined anchored locations
+        if 'anchored' in crop_type:
+            # Create anchor positions
+            crop_anchors = [
+                0.0, 0.50, 1.0
+            ]
+
+            widths = [
+                anchor * d_width for anchor in crop_anchors
+            ]
+            x_start = int(widths[np.random.randint(low=0, high=len(widths))])
+
+        # Randomly select a crop location
+        else:
+            x_start = np.random.randint(low=0, high=d_width+1)
+
+    # If bottom alignment, then set starting height to bottom position
+    if 'bottom' in crop_type:
+        y_start = d_height
+
+    elif 'vertical' in crop_type:
+
+        # Select from one of the pre-defined anchored locations
+        if 'anchored' in crop_type:
+            # Create anchor positions
+            crop_anchors = [
+                0.0, 0.50, 1.0
+            ]
+
+            heights = [
+                anchor * d_height for anchor in crop_anchors
+            ]
+            y_start = int(heights[np.random.randint(low=0, high=len(heights))])
+
+        # Randomly select a crop location
+        else:
+            y_start = np.random.randint(low=0, high=d_height+1)
+
+    # Crop each input into (n_height, n_width)
+    y_end = y_start + n_height
+    x_end = x_start + n_width
+
+    outputs = [
+        T[:, y_start:y_end, x_start:x_end] for T in inputs
+    ]
+
+    # Adjust intrinsics
+    if intrinsics is not None:
+        offset_principal_point = [[0.0, 0.0, -x_start],
+                                  [0.0, 0.0, -y_start],
+                                  [0.0, 0.0, 0.0     ]]
+
+        intrinsics = [
+            in_ + offset_principal_point for in_ in intrinsics
+        ]
+
+        return outputs, intrinsics
+    else:
+        return outputs

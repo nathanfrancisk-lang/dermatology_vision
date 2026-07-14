@@ -5,13 +5,13 @@ parser = argparse.ArgumentParser()
 
 # Input filepaths
 parser.add_argument('--train_image_paths_file',
-    type=str, required=True, help='Path to file containing training image paths')
+    nargs='+', type=str, required=True, help='Paths to files containing training image paths')
 parser.add_argument('--train_labels_file',
-    type=str, required=True, help='Path to file containing training labels')
+    nargs='+', type=str, required=True, help='Paths to files containing training labels')
 parser.add_argument('--val_image_paths_file',
-    type=str, required=True, help='Path to file containing validation image paths')
+    nargs='+', type=str, required=True, help='Paths to files containing validation image paths')
 parser.add_argument('--val_labels_file',
-    type=str, required=True, help='Path to file containing validation labels')
+    nargs='+', type=str, required=True, help='Paths to files containing validation labels')
 
 # Input settings
 parser.add_argument('--batch_size',
@@ -36,6 +36,8 @@ parser.add_argument('--random_flip_type',
     nargs='+', type=str, default=['none'], help='Flip type: horizontal, vertical, none')
 parser.add_argument('--random_rotate_max',
     type=float, default=0, help='Max rotation angle for augmentation')
+parser.add_argument('--random_crop',
+    action='store_true', help='Use aspect-ratio preserving random crop during training and center crop during validation')
 
 # Encoder settings
 parser.add_argument('--encoder_type',
@@ -44,6 +46,8 @@ parser.add_argument('--pretrained',
     action='store_true', help='Use ImageNet pretrained weights')
 
 # Training settings
+parser.add_argument('--balance_sampler',
+    action='store_true', help='Use a WeightedRandomSampler to balance training batches')
 parser.add_argument('--learning_rates',
     nargs='+', type=float, default=[1e-4], help='Learning rates for the schedule')
 parser.add_argument('--learning_schedule',
@@ -106,10 +110,12 @@ if __name__ == '__main__':
           random_hue=args.random_hue,
           random_flip_type=args.random_flip_type,
           random_rotate_max=args.random_rotate_max,
+          random_crop=args.random_crop,
           # Encoder settings
           encoder_type=args.encoder_type,
           pretrained=args.pretrained,
           # Training settings
+          balance_sampler=args.balance_sampler,
           learning_rates=args.learning_rates,
           learning_schedule=args.learning_schedule,
           learning_rate_scheduler=args.learning_rate_scheduler,

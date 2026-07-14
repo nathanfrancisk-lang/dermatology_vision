@@ -5,9 +5,9 @@ parser = argparse.ArgumentParser()
 
 # Input filepaths
 parser.add_argument('--image_paths_file',
-    type=str, required=True, help='Path to file containing image paths')
+    nargs='+', type=str, required=True, help='Paths to files containing image paths')
 parser.add_argument('--labels_file',
-    type=str, required=True, help='Path to file containing labels')
+    nargs='+', type=str, required=True, help='Paths to files containing labels')
 parser.add_argument('--checkpoint_path',
     type=str, required=True, help='Path to model checkpoint')
 
