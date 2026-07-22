@@ -39,10 +39,10 @@ python src/train_eczema_binary_classification.py \
 --n_epoch 100 \
 --loss_func cross_entropy \
 --checkpoint_dirpath \
-    checkpoints/eczema_binary_resnet50 \
+    checkpoints/eczema_binary_resnet50_32x224x224_ \
 --n_step_per_checkpoint 1000 \
 --n_step_per_summary 100 \
 --n_display 5 \
 --start_step_validation 0 \
 --device gpu \
---n_thread 8
+--n_thread 2
