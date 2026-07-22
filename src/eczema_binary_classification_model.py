@@ -260,6 +260,7 @@ class EczemaBinaryClassificationModel(object):
                     tag,
                     step,
                     images=None,
+                    labels=None,
                     scalars=None,
                     n_image_per_summary=4):
         '''
@@ -274,6 +275,8 @@ class EczemaBinaryClassificationModel(object):
                 global step number
             images : torch.Tensor or None
                 batch of images to log (N x C x H x W)
+            labels : torch.Tensor or None
+                batch of ground truth labels (N,) aligned with images
             scalars : dict or None
                 dictionary of scalar name -> value pairs to log
             n_image_per_summary : int
@@ -299,8 +302,13 @@ class EczemaBinaryClassificationModel(object):
                 if image.max() > 1.0:
                     image = image / 255.0
 
+                if labels is not None:
+                    image_tag = '{}/image_{}_label_{}'.format(tag, idx, int(labels[idx]))
+                else:
+                    image_tag = '{}/image_{}'.format(tag, idx)
+
                 summary_writer.add_image(
-                    '{}/image_{}'.format(tag, idx),
+                    image_tag,
                     image,
                     step)
 

@@ -71,6 +71,10 @@ parser.add_argument('--loss_func',
 parser.add_argument('--loss_class_weights',
     nargs='+', type=float, default=None, help='Class weights for weighted cross entropy')
 
+# Evaluation settings
+parser.add_argument('--classification_threshold',
+    type=float, default=0.5, help='Probability threshold on P(eczema) for positive prediction; lower favors recall')
+
 # Checkpoint and summary settings
 parser.add_argument('--checkpoint_dirpath',
     type=str, required=True, help='Directory for saving checkpoints')
@@ -127,6 +131,8 @@ if __name__ == '__main__':
           # Loss settings
           loss_func_name=args.loss_func,
           loss_class_weights=args.loss_class_weights,
+          # Evaluation settings
+          classification_threshold=args.classification_threshold,
           # Checkpoint settings
           checkpoint_dirpath=args.checkpoint_dirpath,
           n_step_per_checkpoint=args.n_step_per_checkpoint,

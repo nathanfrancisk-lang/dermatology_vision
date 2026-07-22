@@ -38,8 +38,9 @@ python src/train_eczema_binary_classification.py \
 --weight_decay 1e-4 \
 --n_epoch 100 \
 --loss_func cross_entropy \
+--classification_threshold 0.35 \
 --checkpoint_dirpath \
-    checkpoints/eczema_binary_resnet50_32x224x224_ \
+    checkpoints/eczema_binary_resnet50_32x224x224_lr1e-4_crossentropy_thresh0.35 \
 --n_step_per_checkpoint 1000 \
 --n_step_per_summary 100 \
 --n_display 5 \

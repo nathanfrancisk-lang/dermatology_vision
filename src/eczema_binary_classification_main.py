@@ -74,6 +74,8 @@ def train(# Input file paths
           # Loss settings
           loss_func_name='cross_entropy',
           loss_class_weights=None,
+          # Evaluation settings
+          classification_threshold=0.5,
           # Checkpoint and summary settings
           checkpoint_dirpath='checkpoints',
           n_step_per_checkpoint=1000,
@@ -140,6 +142,8 @@ def train(# Input file paths
             loss function: cross_entropy, weighted_cross_entropy
         loss_class_weights : list[float] or None
             class weights for weighted cross entropy
+        classification_threshold : float
+            probability threshold on P(eczema) for classifying as positive; lower values favor recall
         checkpoint_dirpath : str
             directory for saving checkpoints
         n_step_per_checkpoint : int
@@ -202,6 +206,7 @@ def train(# Input file paths
     log('  n_epoch:                {}'.format(n_epoch), log_path)
     log('  loss_func:              {}'.format(loss_func_name), log_path)
     log('  loss_class_weights:     {}'.format(loss_class_weights), log_path)
+    log('  classification_threshold:{}'.format(classification_threshold), log_path)
     log('  checkpoint_dirpath:     {}'.format(checkpoint_dirpath), log_path)
     log('  n_step_per_checkpoint:  {}'.format(n_step_per_checkpoint), log_path)
     log('  n_step_per_summary:     {}'.format(n_step_per_summary), log_path)
@@ -267,7 +272,7 @@ def train(# Input file paths
     if balance_sampler:
         from collections import Counter
         from torch.utils.data import WeightedRandomSampler
-        
+
         # Count classes in training dataset
         class_counts = Counter(train_dataset.labels)
         # Class weights: inverse of count
@@ -275,12 +280,12 @@ def train(# Input file paths
         # Compute weight for each sample
         sample_weights = [class_weights[lbl] for lbl in train_dataset.labels]
         sample_weights = torch.tensor(sample_weights, dtype=torch.float32)
-        
+
         train_sampler = WeightedRandomSampler(
             weights=sample_weights,
             num_samples=len(sample_weights),
             replacement=True)
-        
+
         train_shuffle = False
         log('Using WeightedRandomSampler for training loader imbalance balance.', log_path)
     else:
@@ -472,11 +477,26 @@ def train(# Input file paths
                 train_scalars = loss_info.copy()
                 train_scalars['learning_rate'] = current_lr
 
+                # Batch-level confusion matrix
+                with torch.no_grad():
+                    train_probabilities = torch.softmax(logits, dim=1)
+                    train_predictions = (train_probabilities[:, 1] > classification_threshold).long()
+
+                    train_cm = eval_utils.compute_confusion_matrix(
+                        predictions=train_predictions.cpu().numpy(),
+                        labels=label.cpu().numpy())
+
+                train_scalars['tp'] = train_cm['tp']
+                train_scalars['fp'] = train_cm['fp']
+                train_scalars['tn'] = train_cm['tn']
+                train_scalars['fn'] = train_cm['fn']
+
                 model.log_summary(
                     summary_writer=train_summary_writer,
                     tag='train',
                     step=train_step,
                     images=image.detach().clone(),
+                    labels=label.detach().clone(),
                     scalars=train_scalars,
                     n_image_per_summary=n_display)
 
@@ -508,6 +528,7 @@ def train(# Input file paths
                             best_results=best_results,
                             loss_func_name=loss_func_name,
                             loss_class_weights=loss_class_weights,
+                            classification_threshold=classification_threshold,
                             device=device,
                             summary_writer=val_summary_writer,
                             n_display=n_display,
@@ -545,6 +566,7 @@ def train(# Input file paths
             best_results=best_results,
             loss_func_name=loss_func_name,
             loss_class_weights=loss_class_weights,
+            classification_threshold=classification_threshold,
             device=device,
             summary_writer=val_summary_writer,
             n_display=n_display,
@@ -587,6 +609,8 @@ def run(# Input file paths
         normalized_image_range=[0, 1],
         # Encoder settings
         encoder_type='resnet50',
+        # Evaluation settings
+        classification_threshold=0.5,
         # Output settings
         output_path=None,
         save_outputs=False,
@@ -613,6 +637,8 @@ def run(# Input file paths
             [min, max] range for image normalization
         encoder_type : str
             encoder backbone architecture
+        classification_threshold : float
+            probability threshold on P(eczema) for classifying as positive; lower values favor recall
         output_path : str or None
             directory to save results
         save_outputs : bool
@@ -648,6 +674,7 @@ def run(# Input file paths
     log('  n_height:               {}'.format(n_height), log_path)
     log('  n_width:                {}'.format(n_width), log_path)
     log('  encoder_type:           {}'.format(encoder_type), log_path)
+    log('  classification_threshold:{}'.format(classification_threshold), log_path)
     log('  output_path:            {}'.format(output_path), log_path)
     log('  device:                 {}'.format(device), log_path)
     log('', log_path)
@@ -735,7 +762,7 @@ def run(# Input file paths
 
             # Get predictions and probabilities
             probabilities = torch.softmax(logits, dim=1)
-            predictions = torch.argmax(logits, dim=1)
+            predictions = (probabilities[:, 1] > classification_threshold).long()
 
             all_predictions.append(predictions.cpu().numpy())
             all_probabilities.append(probabilities[:, 1].cpu().numpy())
@@ -801,6 +828,7 @@ def validate(model,
              best_results,
              loss_func_name,
              loss_class_weights,
+             classification_threshold,
              device,
              summary_writer,
              n_display,
@@ -821,6 +849,8 @@ def validate(model,
             loss function name (cross_entropy or weighted_cross_entropy)
         loss_class_weights : list[float] or None
             class weights for weighted cross entropy
+        classification_threshold : float
+            probability threshold on P(eczema) for classifying as positive; lower values favor recall
         device : torch.device
             device to run inference on
         summary_writer : SummaryWriter or None
@@ -862,11 +892,15 @@ def validate(model,
 
         # Get predictions and probabilities
         probabilities = torch.softmax(logits, dim=1)
-        predictions = torch.argmax(logits, dim=1)
+        predictions = (probabilities[:, 1] > classification_threshold).long()
 
         all_predictions.append(predictions.cpu().numpy())
         all_probabilities.append(probabilities[:, 1].detach().cpu().numpy())
         all_labels.append(label.cpu().numpy())
+
+        # Keep last batch around for sample image logging
+        last_images = image
+        last_labels = label
 
     # Concatenate all results
     all_predictions = np.concatenate(all_predictions, axis=0)
@@ -903,13 +937,19 @@ def validate(model,
             'recall_macro': results['recall_macro'],
             'f1_macro': results['f1_macro'],
             'specificity': results['specificity'],
-            'auc_roc': results['auc_roc']
+            'auc_roc': results['auc_roc'],
+            'tp': results['tp'],
+            'fp': results['fp'],
+            'tn': results['tn'],
+            'fn': results['fn']
         }
 
         model.log_summary(
             summary_writer=summary_writer,
             tag='val',
             step=step,
+            images=last_images.detach().clone(),
+            labels=last_labels.detach().clone(),
             scalars=val_scalars,
             n_image_per_summary=n_display)
 

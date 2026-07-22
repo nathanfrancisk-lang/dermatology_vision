@@ -14,6 +14,7 @@ python src/run_eczema_binary_classification.py \
 --n_width 224 \
 --normalized_image_range 0 1 \
 --encoder_type resnet50 \
+--classification_threshold 0.5 \
 --output_path \
     results/eczema_binary_resnet50 \
 --save_outputs \

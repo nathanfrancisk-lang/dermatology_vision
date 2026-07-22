@@ -25,6 +25,10 @@ parser.add_argument('--normalized_image_range',
 parser.add_argument('--encoder_type',
     type=str, default='resnet50', help='Encoder backbone: resnet18, resnet34, resnet50')
 
+# Evaluation settings
+parser.add_argument('--classification_threshold',
+    type=float, default=0.5, help='Probability threshold on P(eczema) for positive prediction; lower favors recall')
+
 # Output settings
 parser.add_argument('--output_path',
     type=str, default=None, help='Directory to save results')
@@ -50,6 +54,8 @@ if __name__ == '__main__':
         normalized_image_range=args.normalized_image_range,
         # Encoder settings
         encoder_type=args.encoder_type,
+        # Evaluation settings
+        classification_threshold=args.classification_threshold,
         # Output settings
         output_path=args.output_path,
         save_outputs=args.save_outputs,
