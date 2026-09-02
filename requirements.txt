@@ -1,7 +1,9 @@
-numpy
-opencv-python
-pillow
-scikit-learn
-tensorboard
-torch
-torchvision
+matplotlib==3.10.8
+numpy==2.5.1
+opencv-python==5.0.0.93
+pillow==12.3.0
+scikit-learn==1.9.0
+tensorboard==2.21.0
+torch==2.13.0
+torchvision==0.28.0
+tqdm==4.68.4
