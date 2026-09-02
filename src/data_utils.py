@@ -47,6 +47,55 @@ def write_paths(filepath, paths):
         for idx in range(len(paths)):
             o.write(paths[idx] + '\n')
 
+def stratified_split(strata, n_split, seed=13):
+    '''
+    Splits indices into groups holding the composition of strata roughly constant
+
+    Used by the setup scripts to carve validation and test splits at dataset creation time, so
+    no downstream script has to re-derive them. Stratifying matters at these class ratios: eczema
+    is under 13% of every split, so an unstratified draw can shift the positive rate by a couple
+    of points, which moves any sensitivity target evaluated against it.
+
+    Arg(s):
+        strata : list
+            per-sample grouping key; samples sharing a key are divided in the same proportions
+        n_split : list[float]
+            fractions to divide into, must sum to 1
+        seed : int
+            seed for the shuffle, fixed so splits are reproducible across runs
+    Return:
+        list[list[int]] : one sorted index list per entry in n_split
+    '''
+
+    assert abs(sum(n_split) - 1.0) < 1e-9, \
+        'n_split must sum to 1, got {}'.format(sum(n_split))
+
+    rng = random.Random(seed)
+    splits = [[] for _ in n_split]
+
+    for stratum in sorted(set(strata), key=str):
+        indices = [idx for idx, s in enumerate(strata) if s == stratum]
+        rng.shuffle(indices)
+
+        # Largest-remainder allocation: floor every share, then hand out the leftovers to the
+        # splits with the largest fractional parts. Rounding each share independently can drop
+        # or duplicate a sample when a stratum is small, and the rare strata here (Fitzpatrick
+        # type VI) are exactly the ones worth counting correctly.
+        exact = [len(indices) * fraction for fraction in n_split]
+        counts = [int(value) for value in exact]
+
+        leftover = len(indices) - sum(counts)
+        ranked = sorted(range(len(n_split)), key=lambda i: exact[i] - counts[i], reverse=True)
+        for split_idx in ranked[:leftover]:
+            counts[split_idx] += 1
+
+        offset = 0
+        for split_idx, count in enumerate(counts):
+            splits[split_idx].extend(indices[offset:offset + count])
+            offset += count
+
+    return [sorted(split) for split in splits]
+
 def load_image(path, normalize=False, data_type='color', data_format='HWC'):
     '''
     Loads an RGB, gray, or label (with validity map in alpha) image

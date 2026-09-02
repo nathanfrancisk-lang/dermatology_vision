@@ -61,6 +61,7 @@ def train(# Input file paths
           # Encoder settings
           encoder_type='resnet50',
           pretrained=True,
+          imagenet_normalize=True,
           # Training settings
           balance_sampler=False,
           learning_rates=[1e-4],
@@ -74,14 +75,17 @@ def train(# Input file paths
           # Loss settings
           loss_func_name='cross_entropy',
           loss_class_weights=None,
+          label_smoothing=0.0,
           # Evaluation settings
           classification_threshold=0.5,
+          target_sensitivity=0.9,
           # Checkpoint and summary settings
           checkpoint_dirpath='checkpoints',
           n_step_per_checkpoint=1000,
           n_step_per_summary=100,
           n_display=5,
           start_step_validation=0,
+          early_stop_patience=0,
           restore_path=None,
           # Hardware settings
           device='gpu',
@@ -122,6 +126,8 @@ def train(# Input file paths
             encoder backbone architecture
         pretrained : bool
             use ImageNet pretrained weights
+        imagenet_normalize : bool
+            standardize inputs by the ImageNet channel mean and std the backbone expects
         learning_rates : list[float]
             learning rates for the schedule
         learning_schedule : list[int]
@@ -142,8 +148,14 @@ def train(# Input file paths
             loss function: cross_entropy, weighted_cross_entropy
         loss_class_weights : list[float] or None
             class weights for weighted cross entropy
+        label_smoothing : float
+            label smoothing factor in [0, 1); counters the overconfidence that makes
+            threshold tuning useless
         classification_threshold : float
             probability threshold on P(eczema) for classifying as positive; lower values favor recall
+        target_sensitivity : float
+            sensitivity on the eczema class the deployed model should hit; checkpoints are
+            selected on specificity at this sensitivity, and the matching threshold is saved
         checkpoint_dirpath : str
             directory for saving checkpoints
         n_step_per_checkpoint : int
@@ -154,6 +166,8 @@ def train(# Input file paths
             number of display samples per summary
         start_step_validation : int
             step to begin running validation
+        early_stop_patience : int
+            stop after this many validations without improvement; 0 disables
         restore_path : str or None
             path to restore model checkpoint from
         device : str
@@ -193,8 +207,15 @@ def train(# Input file paths
     log('  n_width:                {}'.format(n_width), log_path)
     log('  normalized_image_range: {}'.format(normalized_image_range), log_path)
     log('  random_crop:            {}'.format(random_crop), log_path)
+    log('  random_brightness:      {}'.format(random_brightness), log_path)
+    log('  random_contrast:        {}'.format(random_contrast), log_path)
+    log('  random_saturation:      {}'.format(random_saturation), log_path)
+    log('  random_hue:             {}'.format(random_hue), log_path)
+    log('  random_flip_type:       {}'.format(random_flip_type), log_path)
+    log('  random_rotate_max:      {}'.format(random_rotate_max), log_path)
     log('  encoder_type:           {}'.format(encoder_type), log_path)
     log('  pretrained:             {}'.format(pretrained), log_path)
+    log('  imagenet_normalize:     {}'.format(imagenet_normalize), log_path)
     log('  balance_sampler:        {}'.format(balance_sampler), log_path)
     log('  learning_rates:         {}'.format(learning_rates), log_path)
     log('  learning_schedule:      {}'.format(learning_schedule), log_path)
@@ -206,11 +227,14 @@ def train(# Input file paths
     log('  n_epoch:                {}'.format(n_epoch), log_path)
     log('  loss_func:              {}'.format(loss_func_name), log_path)
     log('  loss_class_weights:     {}'.format(loss_class_weights), log_path)
+    log('  label_smoothing:        {}'.format(label_smoothing), log_path)
     log('  classification_threshold:{}'.format(classification_threshold), log_path)
+    log('  target_sensitivity:     {}'.format(target_sensitivity), log_path)
     log('  checkpoint_dirpath:     {}'.format(checkpoint_dirpath), log_path)
     log('  n_step_per_checkpoint:  {}'.format(n_step_per_checkpoint), log_path)
     log('  n_step_per_summary:     {}'.format(n_step_per_summary), log_path)
     log('  start_step_validation:  {}'.format(start_step_validation), log_path)
+    log('  early_stop_patience:    {}'.format(early_stop_patience), log_path)
     log('  device:                 {}'.format(device), log_path)
     log('  n_thread:               {}'.format(n_thread), log_path)
     log('', log_path)
@@ -249,8 +273,16 @@ def train(# Input file paths
         image_paths=train_image_paths,
         labels=train_labels,
         shape=(n_height, n_width),
-        random_crop=random_crop)
+        random_crop=random_crop,
+        random_brightness=random_brightness,
+        random_contrast=random_contrast,
+        random_saturation=random_saturation,
+        random_hue=random_hue,
+        random_flip_type=random_flip_type,
+        random_rotate_max=random_rotate_max)
 
+    # No augmentation arguments: validation must be deterministic so that step-to-step
+    # metric changes come from the model rather than from the sampled transforms
     val_dataset = datasets.EczemaDataset(
         dataset='val',
         image_paths=val_image_paths,
@@ -315,7 +347,15 @@ def train(# Input file paths
         encoder_type=encoder_type,
         pretrained=pretrained,
         normalized_image_range=normalized_image_range,
+        imagenet_normalize=imagenet_normalize,
         device=device)
+
+    # Saved with every checkpoint so inference reproduces the exact input geometry
+    preprocessing = {
+        'random_crop': random_crop,
+        'n_height': n_height,
+        'n_width': n_width
+    }
 
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -371,7 +411,7 @@ def train(# Input file paths
     start_step = 0
 
     if restore_path is not None and restore_path != '':
-        start_step = model.restore_model(restore_path, optimizer)
+        start_step, _ = model.restore_model(restore_path, optimizer)
         log('Restored model from: {}'.format(restore_path), log_path)
         log('Starting from step:  {}'.format(start_step), log_path)
         log('', log_path)
@@ -397,8 +437,14 @@ def train(# Input file paths
         'recall': -1.0,
         'f1': -1.0,
         'specificity': -1.0,
-        'auc_roc': -1.0
+        'auc_roc': -1.0,
+        'selection_specificity': -1.0,
+        'selection_threshold': 0.5
     }
+
+    # Validations since the last improvement, for early stopping
+    n_validation_since_best = 0
+    stop_early = False
 
     '''
     Training loop
@@ -411,6 +457,9 @@ def train(# Input file paths
     model.train()
 
     for epoch in range(1, n_epoch + 1):
+
+        if stop_early:
+            break
 
         train_iter = tqdm(
             train_dataloader,
@@ -441,7 +490,8 @@ def train(# Input file paths
                 logits=logits,
                 labels=label,
                 loss_func=loss_func_name,
-                class_weights=loss_class_weights)
+                class_weights=loss_class_weights,
+                label_smoothing=label_smoothing)
 
             # Backward pass
             loss.backward()
@@ -480,7 +530,7 @@ def train(# Input file paths
                 # Batch-level confusion matrix
                 with torch.no_grad():
                     train_probabilities = torch.softmax(logits, dim=1)
-                    train_predictions = (train_probabilities[:, 1] > classification_threshold).long()
+                    train_predictions = (train_probabilities[:, 1] >= classification_threshold).long()
 
                     train_cm = eval_utils.compute_confusion_matrix(
                         predictions=train_predictions.cpu().numpy(),
@@ -528,7 +578,9 @@ def train(# Input file paths
                             best_results=best_results,
                             loss_func_name=loss_func_name,
                             loss_class_weights=loss_class_weights,
+                            label_smoothing=label_smoothing,
                             classification_threshold=classification_threshold,
+                            target_sensitivity=target_sensitivity,
                             device=device,
                             summary_writer=val_summary_writer,
                             n_display=n_display,
@@ -536,16 +588,27 @@ def train(# Input file paths
 
                     # Save best model
                     if best_results['step'] == train_step:
-                        model.save_model(best_checkpoint_filepath, train_step, optimizer)
+                        model.save_model(
+                            best_checkpoint_filepath, train_step, optimizer, preprocessing)
                         log('Saved best model at step {}'.format(train_step), log_path)
+                        n_validation_since_best = 0
+                    else:
+                        n_validation_since_best += 1
 
                     model.train()
+
+                    if early_stop_patience > 0 and n_validation_since_best >= early_stop_patience:
+                        log('Early stopping at step {}: no improvement in {} validations'.format(
+                            train_step, n_validation_since_best), log_path)
+                        stop_early = True
+                        break
 
                 # Save regular checkpoint
                 model.save_model(
                     checkpoint_filepath.format(train_step),
                     train_step,
-                    optimizer)
+                    optimizer,
+                    preprocessing)
 
     '''
     Final validation and checkpoint
@@ -566,7 +629,9 @@ def train(# Input file paths
             best_results=best_results,
             loss_func_name=loss_func_name,
             loss_class_weights=loss_class_weights,
+            label_smoothing=label_smoothing,
             classification_threshold=classification_threshold,
+            target_sensitivity=target_sensitivity,
             device=device,
             summary_writer=val_summary_writer,
             n_display=n_display,
@@ -574,23 +639,38 @@ def train(# Input file paths
 
     # Save best model if final step is best
     if best_results['step'] == train_step:
-        model.save_model(best_checkpoint_filepath, train_step, optimizer)
+        model.save_model(best_checkpoint_filepath, train_step, optimizer, preprocessing)
 
     # Save final checkpoint
     model.save_model(
         checkpoint_filepath.format(train_step),
         train_step,
-        optimizer)
+        optimizer,
+        preprocessing)
 
     # Log best results
     log('Best validation results:', log_path)
-    log('  Step:        {}'.format(best_results['step']), log_path)
-    log('  Accuracy:    {:.5f}'.format(best_results['accuracy']), log_path)
-    log('  Precision:   {:.5f}'.format(best_results['precision']), log_path)
-    log('  Recall:      {:.5f}'.format(best_results['recall']), log_path)
-    log('  F1:          {:.5f}'.format(best_results['f1']), log_path)
-    log('  Specificity: {:.5f}'.format(best_results['specificity']), log_path)
-    log('  AUC-ROC:     {:.5f}'.format(best_results['auc_roc']), log_path)
+    log('  Step:                  {}'.format(best_results['step']), log_path)
+    log('  Sensitivity (eczema):  {:.5f}'.format(best_results['recall']), log_path)
+    log('  Precision   (eczema):  {:.5f}'.format(best_results['precision']), log_path)
+    log('  F1          (eczema):  {:.5f}'.format(best_results['f1']), log_path)
+    log('  Specificity:           {:.5f}'.format(best_results['specificity']), log_path)
+    log('  AUC-ROC:               {:.5f}'.format(best_results['auc_roc']), log_path)
+    log('  Accuracy:              {:.5f}'.format(best_results['accuracy']), log_path)
+    log('', log_path)
+
+    # Persist the threshold hitting the target sensitivity so inference does not have to guess.
+    # NOTE: this is calibrated on the validation set. Where validation and test are the same
+    # split, this threshold is fit to the test set and the resulting numbers are optimistic.
+    threshold_filepath = os.path.join(checkpoint_dirpath, 'threshold.txt')
+
+    with open(threshold_filepath, 'w') as f:
+        f.write('{}\n'.format(best_results['selection_threshold']))
+
+    log('Operating point for {:.0%} target sensitivity:'.format(target_sensitivity), log_path)
+    log('  Threshold:             {:.6g}'.format(best_results['selection_threshold']), log_path)
+    log('  Specificity:           {:.5f}'.format(best_results['selection_specificity']), log_path)
+    log('  Saved to:              {}'.format(threshold_filepath), log_path)
     log('', log_path)
 
     # Close TensorBoard writers
@@ -607,10 +687,12 @@ def run(# Input file paths
         n_height=224,
         n_width=224,
         normalized_image_range=[0, 1],
+        random_crop=None,
         # Encoder settings
         encoder_type='resnet50',
         # Evaluation settings
         classification_threshold=0.5,
+        threshold_path=None,
         # Output settings
         output_path=None,
         save_outputs=False,
@@ -635,10 +717,14 @@ def run(# Input file paths
             image width
         normalized_image_range : list[float]
             [min, max] range for image normalization
+        random_crop : bool or None
+            override the crop geometry; None uses whatever the checkpoint was trained with
         encoder_type : str
             encoder backbone architecture
         classification_threshold : float
             probability threshold on P(eczema) for classifying as positive; lower values favor recall
+        threshold_path : str or None
+            path to a threshold.txt written by training; overrides classification_threshold
         output_path : str or None
             directory to save results
         save_outputs : bool
@@ -666,6 +752,12 @@ def run(# Input file paths
         os.makedirs(output_path, exist_ok=True)
     log_path = os.path.join(output_path, 'results.txt') if output_path is not None else None
 
+    # A threshold calibrated during training beats a hand-picked one, since the useful
+    # operating points are wherever the probability distribution actually puts them
+    if threshold_path is not None:
+        with open(threshold_path, 'r') as f:
+            classification_threshold = float(f.read().strip())
+
     log('Inference settings:', log_path)
     log('  image_paths_file:       {}'.format(image_paths_file), log_path)
     log('  labels_file:            {}'.format(labels_file), log_path)
@@ -674,7 +766,9 @@ def run(# Input file paths
     log('  n_height:               {}'.format(n_height), log_path)
     log('  n_width:                {}'.format(n_width), log_path)
     log('  encoder_type:           {}'.format(encoder_type), log_path)
-    log('  classification_threshold:{}'.format(classification_threshold), log_path)
+    log('  classification_threshold:{:.6g}{}'.format(
+        classification_threshold,
+        ' (from {})'.format(threshold_path) if threshold_path is not None else ''), log_path)
     log('  output_path:            {}'.format(output_path), log_path)
     log('  device:                 {}'.format(device), log_path)
     log('', log_path)
@@ -695,11 +789,45 @@ def run(# Input file paths
     for filepath in labels_file:
         labels.extend(data_utils.read_paths(filepath))
 
+    '''
+    Set up and restore model
+
+    Restored before the dataset is built: the checkpoint carries the preprocessing config it
+    was trained under, and feeding the model a different input geometry than it saw in
+    training silently costs accuracy with no error anywhere.
+    '''
+    model = EczemaBinaryClassificationModel(
+        encoder_type=encoder_type,
+        pretrained=False,
+        normalized_image_range=normalized_image_range,
+        device=device)
+
+    _, preprocessing = model.restore_model(checkpoint_path)
+    model.to(device)
+    model.eval()
+
+    log('Restored model from: {}'.format(checkpoint_path), log_path)
+
+    # Explicit argument wins, otherwise follow the checkpoint
+    if random_crop is None:
+        random_crop = preprocessing.get('random_crop', False)
+        log('  random_crop:          {} (from checkpoint)'.format(random_crop), log_path)
+    else:
+        log('  random_crop:          {} (overridden)'.format(random_crop), log_path)
+
+    log('  imagenet_normalize:   {} (from checkpoint)'.format(model.imagenet_normalize), log_path)
+    log('', log_path)
+
+    '''
+    Set up dataset and dataloader
+    '''
+    # dataset='test' takes the deterministic path: center crop, no augmentation
     test_dataset = datasets.EczemaDataset(
         dataset='test',
         image_paths=image_paths,
         labels=labels,
-        shape=(n_height, n_width))
+        shape=(n_height, n_width),
+        random_crop=random_crop)
 
     n_test_sample = len(test_dataset)
 
@@ -712,22 +840,6 @@ def run(# Input file paths
         shuffle=False,
         num_workers=n_thread,
         drop_last=False)
-
-    '''
-    Set up and restore model
-    '''
-    model = EczemaBinaryClassificationModel(
-        encoder_type=encoder_type,
-        pretrained=False,
-        normalized_image_range=normalized_image_range,
-        device=device)
-
-    model.restore_model(checkpoint_path)
-    model.to(device)
-    model.eval()
-
-    log('Restored model from: {}'.format(checkpoint_path), log_path)
-    log('', log_path)
 
     '''
     Run inference
@@ -762,7 +874,7 @@ def run(# Input file paths
 
             # Get predictions and probabilities
             probabilities = torch.softmax(logits, dim=1)
-            predictions = (probabilities[:, 1] > classification_threshold).long()
+            predictions = (probabilities[:, 1] >= classification_threshold).long()
 
             all_predictions.append(predictions.cpu().numpy())
             all_probabilities.append(probabilities[:, 1].cpu().numpy())
@@ -782,14 +894,8 @@ def run(# Input file paths
         labels=all_labels)
 
     log('Evaluation results:', log_path)
-    log('  Accuracy:    {:.5f}'.format(results['accuracy']), log_path)
-    log('  Precision:   {:.5f}'.format(results['precision_macro']), log_path)
-    log('  Recall:      {:.5f}'.format(results['recall_macro']), log_path)
-    log('  F1:          {:.5f}'.format(results['f1_macro']), log_path)
-    log('  Specificity: {:.5f}'.format(results['specificity']), log_path)
-    log('  AUC-ROC:     {:.5f}'.format(results['auc_roc']), log_path)
-    log('  TP: {}  FP: {}  TN: {}  FN: {}'.format(
-        results['tp'], results['fp'], results['tn'], results['fn']), log_path)
+    for line in eval_utils.format_results(results):
+        log(line, log_path)
     log('', log_path)
 
     log('Confusion Matrix:', log_path)
@@ -828,7 +934,9 @@ def validate(model,
              best_results,
              loss_func_name,
              loss_class_weights,
+             label_smoothing,
              classification_threshold,
+             target_sensitivity,
              device,
              summary_writer,
              n_display,
@@ -849,8 +957,12 @@ def validate(model,
             loss function name (cross_entropy or weighted_cross_entropy)
         loss_class_weights : list[float] or None
             class weights for weighted cross entropy
+        label_smoothing : float
+            label smoothing factor in [0, 1)
         classification_threshold : float
             probability threshold on P(eczema) for classifying as positive; lower values favor recall
+        target_sensitivity : float
+            sensitivity on the eczema class that checkpoint selection targets
         device : torch.device
             device to run inference on
         summary_writer : SummaryWriter or None
@@ -886,13 +998,14 @@ def validate(model,
             logits=logits,
             labels=label,
             loss_func=loss_func_name,
-            class_weights=loss_class_weights)
+            class_weights=loss_class_weights,
+            label_smoothing=label_smoothing)
 
         val_losses.append(loss.item())
 
         # Get predictions and probabilities
         probabilities = torch.softmax(logits, dim=1)
-        predictions = (probabilities[:, 1] > classification_threshold).long()
+        predictions = (probabilities[:, 1] >= classification_threshold).long()
 
         all_predictions.append(predictions.cpu().numpy())
         all_probabilities.append(probabilities[:, 1].detach().cpu().numpy())
@@ -915,17 +1028,22 @@ def validate(model,
         probabilities=all_probabilities,
         labels=all_labels)
 
+    # Specificity at the target operating point: the metric checkpoints are selected on.
+    # Threshold-independent, so it does not move when classification_threshold is retuned.
+    selection_specificity, selection_threshold = eval_utils.specificity_at_sensitivity(
+        probabilities=all_probabilities,
+        labels=all_labels,
+        target_sensitivity=target_sensitivity)
+
+    results['selection_specificity'] = selection_specificity
+    results['selection_threshold'] = selection_threshold
+
     # Log results
     log('Validation results at step {}:'.format(step), log_path)
-    log('  Loss:        {:.5f}'.format(mean_val_loss), log_path)
-    log('  Accuracy:    {:.5f}'.format(results['accuracy']), log_path)
-    log('  Precision:   {:.5f}'.format(results['precision_macro']), log_path)
-    log('  Recall:      {:.5f}'.format(results['recall_macro']), log_path)
-    log('  F1:          {:.5f}'.format(results['f1_macro']), log_path)
-    log('  Specificity: {:.5f}'.format(results['specificity']), log_path)
-    log('  AUC-ROC:     {:.5f}'.format(results['auc_roc']), log_path)
-    log('  TP: {}  FP: {}  TN: {}  FN: {}'.format(
-        results['tp'], results['fp'], results['tn'], results['fn']), log_path)
+    for line in eval_utils.format_results(results, loss=mean_val_loss):
+        log(line, log_path)
+    log('  Specificity @ {:.0%} sensitivity: {:.5f} (threshold {:.3g})'.format(
+        target_sensitivity, selection_specificity, selection_threshold), log_path)
     log('', log_path)
 
     # Log to TensorBoard
@@ -953,38 +1071,37 @@ def validate(model,
             scalars=val_scalars,
             n_image_per_summary=n_display)
 
-    # Track best results based on improvement across multiple metrics (F1, AUC-ROC, etc.)
-    n_improve = 0
-    if results['accuracy'] > best_results['accuracy']:
-        n_improve += 1
-    if results['precision_macro'] > best_results['precision']:
-        n_improve += 1
-    if results['recall_macro'] > best_results['recall']:
-        n_improve += 1
-    if results['f1_macro'] > best_results['f1']:
-        n_improve += 1
-    if results['specificity'] > best_results['specificity']:
-        n_improve += 1
-    if results['auc_roc'] > best_results['auc_roc']:
-        n_improve += 1
+    # Select checkpoints on AUC-ROC, tie-broken by specificity at the target sensitivity.
+    #
+    # Two rules preceded this. "At least 2 of 6 metrics improved" counted accuracy, specificity
+    # and macro precision, all dominated by the ~88% negative class, so it drifted toward
+    # false-negative-heavy checkpoints. Selecting on selection_specificity directly fixed that
+    # bias but is high variance: it reads the ROC at one point fixed by the ~25 lowest-scoring
+    # positives, and over 36 validations it swung 0.49-0.84 (mean 0.71, sd 0.08), so taking the
+    # max mostly sampled noise. AUC integrates the whole curve and moved in 0.88-0.92 over the
+    # same run. The operating point is still calibrated to target_sensitivity afterwards; this
+    # only decides which checkpoint gets calibrated.
+    is_better = (
+        results['auc_roc'] > best_results['auc_roc'] or
+        (results['auc_roc'] == best_results['auc_roc'] and
+         selection_specificity > best_results['selection_specificity']))
 
-    # Update if we have at least 2 improved metrics, or if it is the first validation step
-    if n_improve >= 2 or best_results['step'] == -1:
+    if is_better or best_results['step'] == -1:
         best_results['accuracy'] = results['accuracy']
-        best_results['precision'] = results['precision_macro']
-        best_results['recall'] = results['recall_macro']
-        best_results['f1'] = results['f1_macro']
+        best_results['precision'] = results['precision_per_class'][eval_utils.POSITIVE_CLASS]
+        best_results['recall'] = results['recall_per_class'][eval_utils.POSITIVE_CLASS]
+        best_results['f1'] = results['f1_per_class'][eval_utils.POSITIVE_CLASS]
         best_results['specificity'] = results['specificity']
         best_results['auc_roc'] = results['auc_roc']
+        best_results['selection_specificity'] = selection_specificity
+        best_results['selection_threshold'] = selection_threshold
         best_results['step'] = step
 
-        log('New best results at step {} (improved {} metrics):'.format(step, n_improve), log_path)
-        log('  Accuracy:    {:.5f}'.format(best_results['accuracy']), log_path)
-        log('  Precision:   {:.5f}'.format(best_results['precision']), log_path)
-        log('  Recall:      {:.5f}'.format(best_results['recall']), log_path)
-        log('  F1:          {:.5f}'.format(best_results['f1']), log_path)
-        log('  Specificity: {:.5f}'.format(best_results['specificity']), log_path)
-        log('  AUC-ROC:     {:.5f}'.format(best_results['auc_roc']), log_path)
+        log('New best results at step {}:'.format(step), log_path)
+        log('  Specificity @ {:.0%} sensitivity: {:.5f} (threshold {:.3g})'.format(
+            target_sensitivity, selection_specificity, selection_threshold), log_path)
+        log('  Sensitivity (eczema):  {:.5f}'.format(best_results['recall']), log_path)
+        log('  AUC-ROC:               {:.5f}'.format(best_results['auc_roc']), log_path)
         log('', log_path)
 
     return best_results

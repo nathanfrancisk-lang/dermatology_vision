@@ -1,9 +1,11 @@
 import os, sys
+from collections import Counter
 import csv
 import numpy as np
 from PIL import Image
 sys.path.insert(0, 'src')
 import data_utils
+import eczema_labels
 import argparse
 from tqdm import tqdm
 
@@ -11,20 +13,119 @@ from tqdm import tqdm
 parser = argparse.ArgumentParser(description="Process the Fitzpatrick17k dataset for Eczema binary classification.")
 
 parser.add_argument("--root_dir", type=str, required=True, help="Path to the raw Fitzpatrick17k dataset directory (contains data/finalfitz17k/ and fitzpatrick17k.csv).")
-parser.add_argument("--output_dir", type=str, required=True, help="Path to save the derived dataset and images.")
+parser.add_argument("--output_dir", type=str, help="Path to save the derived dataset and images. Required unless --splits_only.")
+parser.add_argument("--splits_only", action="store_true", help="Rebuild the train/test split files from the existing reference files, skipping image processing.")
 
 args = parser.parse_args()
 
 TRAIN_REF_DIRPATH = os.path.join('training', 'fitzpatrick17k')
+TEST_REF_DIRPATH = os.path.join('testing', 'fitzpatrick17k')
 
-IMAGE_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'fitzpatrick17k_train_image.txt')
-BINARY_LABEL_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'fitzpatrick17k_train_binary_label.txt')
-ORIGINAL_LABEL_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'fitzpatrick17k_train_original_label.txt')
+# Fitzpatrick17k is the only dataset here carrying skin tone, so it is the only place a
+# tone-stratified test set can come from. Holding out 20% costs ~3300 training images and buys
+# sensitivity broken out by Fitzpatrick type, which is the first thing a dermatology audience
+# asks about. Stratifying on (skin tone, eczema) jointly keeps type VI (635 images) and the 4%
+# eczema rate both intact in the test split.
+TEST_FRACTION = 0.2
+
+SPLIT_OUTPUT_FILEPATHS = {
+    'train': {
+        'image':    os.path.join(TRAIN_REF_DIRPATH, 'fitzpatrick17k_train_image.txt'),
+        'binary':   os.path.join(TRAIN_REF_DIRPATH, 'fitzpatrick17k_train_binary_label.txt'),
+        'original': os.path.join(TRAIN_REF_DIRPATH, 'fitzpatrick17k_train_original_label.txt'),
+        'scale':    os.path.join(TRAIN_REF_DIRPATH, 'fitzpatrick17k_train_fitzpatrick_scale.txt')
+    },
+    'test': {
+        'image':    os.path.join(TEST_REF_DIRPATH, 'fitzpatrick17k_test_image.txt'),
+        'binary':   os.path.join(TEST_REF_DIRPATH, 'fitzpatrick17k_test_binary_label.txt'),
+        'original': os.path.join(TEST_REF_DIRPATH, 'fitzpatrick17k_test_original_label.txt'),
+        'scale':    os.path.join(TEST_REF_DIRPATH, 'fitzpatrick17k_test_fitzpatrick_scale.txt')
+    }
+}
+
+# Where the unsplit reference files live. Before the train/test split existed, every processed
+# image was written straight to the training files, so that is what --splits_only reads back.
+IMAGE_OUTPUT_FILEPATH = SPLIT_OUTPUT_FILEPATHS['train']['image']
+BINARY_LABEL_OUTPUT_FILEPATH = SPLIT_OUTPUT_FILEPATHS['train']['binary']
+ORIGINAL_LABEL_OUTPUT_FILEPATH = SPLIT_OUTPUT_FILEPATHS['train']['original']
 
 def is_eczema_target(label):
-    keywords = ["eczema", "atopic dermatitis"]
-    label_lower = label.lower()
-    return any(keyword in label_lower for keyword in keywords)
+    return eczema_labels.is_eczema_target('fitzpatrick17k', label)
+
+def write_train_test_split(image_paths, binary_labels, original_labels, scales):
+    '''
+    Divides fitzpatrick17k into a training split and a skin-tone stratified test split
+
+    Args:
+        image_paths : list[str]
+            all processed fitzpatrick17k image paths
+        binary_labels : list[str]
+            matching binary labels, '0' or '1'
+        original_labels : list[str]
+            matching free-text diagnosis labels
+        scales : list[str]
+            matching Fitzpatrick scale values, '1' to '6', or '-1' where unrated
+    '''
+
+    # Stratify on the pair so neither tone nor class drifts between splits
+    strata = ['{}_{}'.format(scale, label) for scale, label in zip(scales, binary_labels)]
+
+    train_indices, test_indices = data_utils.stratified_split(
+        strata=strata,
+        n_split=[1.0 - TEST_FRACTION, TEST_FRACTION])
+
+    assert not (set(train_indices) & set(test_indices)), 'train and test splits overlap'
+    assert sorted(train_indices + test_indices) == list(range(len(image_paths))), \
+        'splits do not cover fitzpatrick17k'
+
+    os.makedirs(TRAIN_REF_DIRPATH, exist_ok=True)
+    os.makedirs(TEST_REF_DIRPATH, exist_ok=True)
+
+    for split_name, indices in [('train', train_indices), ('test', test_indices)]:
+        filepaths = SPLIT_OUTPUT_FILEPATHS[split_name]
+
+        data_utils.write_paths(filepaths['image'], [image_paths[i] for i in indices])
+        data_utils.write_paths(filepaths['binary'], [binary_labels[i] for i in indices])
+        data_utils.write_paths(filepaths['original'], [original_labels[i] for i in indices])
+        data_utils.write_paths(filepaths['scale'], [scales[i] for i in indices])
+
+        n_positive = sum(1 for i in indices if binary_labels[i] == '1')
+        by_tone = Counter(scales[i] for i in indices)
+
+        print('Generated {} {} filepaths ({} eczema, {:.2%}) in {}'.format(
+            len(indices), split_name, n_positive, n_positive / len(indices),
+            os.path.dirname(filepaths['image'])))
+        print('    Fitzpatrick type: {}'.format(
+            '  '.join('{}={}'.format(tone, by_tone[tone]) for tone in sorted(by_tone, key=int))))
+
+def read_scales_from_csv(root_dir):
+    '''
+    Recovers the Fitzpatrick scale for each already-processed image
+
+    Images were written in CSV row order, skipping rows whose source file was missing, so
+    replaying that filter reproduces the ordering of the existing reference files. The caller
+    checks the recovered diagnosis labels against the stored ones before trusting the alignment.
+
+    Args:
+        root_dir : str
+            Path to original raw dataset
+    Returns:
+        tuple : (list[str] diagnosis labels, list[str] Fitzpatrick scale values)
+    '''
+
+    csv_path = os.path.join(root_dir, 'fitzpatrick17k.csv')
+    image_dir = os.path.join(root_dir, 'data', 'finalfitz17k')
+
+    labels, scales = [], []
+    with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            if not os.path.exists(os.path.join(image_dir, '{}.jpg'.format(row['md5hash']))):
+                continue
+
+            labels.append(row['label'])
+            scales.append(row['fitzpatrick_scale'])
+
+    return labels, scales
 
 def setup_dataset_fitzpatrick17k(root_dir, output_dir):
     '''
@@ -65,6 +166,7 @@ def setup_dataset_fitzpatrick17k(root_dir, output_dir):
     train_image_paths = []
     train_binary_labels = []
     train_original_labels = []
+    train_scales = []
 
     # Read CSV to build md5hash -> label mapping
     rows = []
@@ -113,21 +215,35 @@ def setup_dataset_fitzpatrick17k(root_dir, output_dir):
         train_image_paths.append(rel_path)
         train_binary_labels.append(binary_label)
         train_original_labels.append(label)
+        train_scales.append(row['fitzpatrick_scale'])
 
         global_img_idx += 1
 
     if skipped > 0:
         print(f"[Info] Skipped {skipped} images (not found or unreadable)")
 
-    # Write Outputs
-    os.makedirs(TRAIN_REF_DIRPATH, exist_ok=True)
-
-    data_utils.write_paths(IMAGE_OUTPUT_FILEPATH, train_image_paths)
-    data_utils.write_paths(BINARY_LABEL_OUTPUT_FILEPATH, train_binary_labels)
-    data_utils.write_paths(ORIGINAL_LABEL_OUTPUT_FILEPATH, train_original_labels)
-
-    print(f"Generated {len(train_image_paths)} training filepaths in {TRAIN_REF_DIRPATH}")
+    write_train_test_split(
+        train_image_paths, train_binary_labels, train_original_labels, train_scales)
 
 if __name__ == "__main__":
-    setup_dataset_fitzpatrick17k(root_dir=args.root_dir,
-                                  output_dir=args.output_dir)
+    if args.splits_only:
+        # The 16.5k image conversions above are unaffected by how the split is drawn.
+        image_paths = data_utils.read_paths(IMAGE_OUTPUT_FILEPATH)
+        binary_labels = data_utils.read_paths(BINARY_LABEL_OUTPUT_FILEPATH)
+        original_labels = data_utils.read_paths(ORIGINAL_LABEL_OUTPUT_FILEPATH)
+
+        csv_labels, scales = read_scales_from_csv(args.root_dir)
+
+        # Skin tone is joined back on by position, so a drifted ordering must not pass silently
+        assert csv_labels == original_labels, (
+            'CSV order no longer matches {} ({} vs {} entries). Re-run the full setup instead '
+            'of --splits_only.'.format(
+                ORIGINAL_LABEL_OUTPUT_FILEPATH, len(csv_labels), len(original_labels)))
+
+        write_train_test_split(image_paths, binary_labels, original_labels, scales)
+    else:
+        if args.output_dir is None:
+            parser.error('--output_dir is required unless --splits_only is set')
+
+        setup_dataset_fitzpatrick17k(root_dir=args.root_dir,
+                                      output_dir=args.output_dir)

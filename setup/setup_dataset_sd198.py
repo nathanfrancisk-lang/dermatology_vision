@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 sys.path.insert(0, 'src')
 import data_utils
+import eczema_labels
 import argparse
 from tqdm import tqdm
 
@@ -21,9 +22,7 @@ BINARY_LABEL_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'sd198_train_bina
 ORIGINAL_LABEL_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'sd198_train_original_label.txt')
 
 def is_eczema_target(class_name):
-    keywords = ["eczema", "atopic dermatitis"]
-    class_lower = class_name.lower()
-    return any(keyword in class_lower for keyword in keywords)
+    return eczema_labels.is_eczema_target('sd198', class_name)
 
 def setup_dataset_sd198(root_dir, output_dir):
     '''

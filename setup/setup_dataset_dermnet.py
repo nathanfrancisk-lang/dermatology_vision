@@ -3,19 +3,22 @@ import numpy as np
 from PIL import Image
 sys.path.insert(0, 'src')
 import data_utils
+import eczema_labels
 import argparse
 from tqdm import tqdm
 
 # Parse arguments globally
 parser = argparse.ArgumentParser(description="Process and split the Dermnet dataset for Eczema binary classification.")
 
-parser.add_argument("--root_dir", type=str, required=True, help="Path to the raw Dermnet dataset directory (contains train/ and test/ subdirectories).")
-parser.add_argument("--output_dir", type=str, required=True, help="Path to save the derived dataset and images.")
+parser.add_argument("--root_dir", type=str, help="Path to the raw Dermnet dataset directory (contains train/ and test/ subdirectories). Required unless --splits_only.")
+parser.add_argument("--output_dir", type=str, help="Path to save the derived dataset and images. Required unless --splits_only.")
+parser.add_argument("--splits_only", action="store_true", help="Rebuild the val/holdout split files from the existing reference files, skipping image processing.")
 
 args = parser.parse_args()
 
 TRAIN_REF_DIRPATH = os.path.join('training', 'dermnet')
 TEST_REF_DIRPATH = os.path.join('testing', 'dermnet')
+VAL_REF_DIRPATH = os.path.join('validation', 'dermnet')
 
 TRAIN_IMAGE_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'dermnet_train_image.txt')
 TRAIN_BINARY_LABEL_OUTPUT_FILEPATH = os.path.join(TRAIN_REF_DIRPATH, 'dermnet_train_binary_label.txt')
@@ -25,10 +28,26 @@ TEST_IMAGE_OUTPUT_FILEPATH = os.path.join(TEST_REF_DIRPATH, 'dermnet_test_image.
 TEST_BINARY_LABEL_OUTPUT_FILEPATH = os.path.join(TEST_REF_DIRPATH, 'dermnet_test_binary_label.txt')
 TEST_ORIGINAL_LABEL_OUTPUT_FILEPATH = os.path.join(TEST_REF_DIRPATH, 'dermnet_test_original_label.txt')
 
+# Dermnet's own test split is divided again, in half. The validation half drives checkpoint
+# selection and threshold calibration during training; the holdout half is only read at reporting
+# time. Splitting here rather than downstream keeps the two from ever being the same images.
+VAL_FRACTION = 0.5
+
+SPLIT_OUTPUT_FILEPATHS = {
+    'val': {
+        'image':    os.path.join(VAL_REF_DIRPATH, 'dermnet_val_image.txt'),
+        'binary':   os.path.join(VAL_REF_DIRPATH, 'dermnet_val_binary_label.txt'),
+        'original': os.path.join(VAL_REF_DIRPATH, 'dermnet_val_original_label.txt')
+    },
+    'holdout': {
+        'image':    os.path.join(TEST_REF_DIRPATH, 'dermnet_holdout_image.txt'),
+        'binary':   os.path.join(TEST_REF_DIRPATH, 'dermnet_holdout_binary_label.txt'),
+        'original': os.path.join(TEST_REF_DIRPATH, 'dermnet_holdout_original_label.txt')
+    }
+}
+
 def is_eczema_target(class_name):
-    keywords = ["eczema", "atopic dermatitis"]
-    class_lower = class_name.lower()
-    return any(keyword in class_lower for keyword in keywords)
+    return eczema_labels.is_eczema_target('dermnet', class_name)
 
 def process_split(split_dir, img_out_dir, global_img_idx):
     '''
@@ -83,6 +102,45 @@ def process_split(split_dir, img_out_dir, global_img_idx):
             global_img_idx += 1
 
     return image_paths, binary_labels, original_labels, global_img_idx
+
+def write_val_holdout_split(image_paths, binary_labels, original_labels):
+    '''
+    Divides the dermnet test split into a validation half and a reporting half
+
+    Stratified on the binary label so both halves carry the same eczema rate.
+
+    Args:
+        image_paths : list[str]
+            image paths of the full dermnet test split
+        binary_labels : list[str]
+            matching binary labels, '0' or '1'
+        original_labels : list[str]
+            matching original dermnet class names, kept so false positives can later be
+            attributed to a diagnosis
+    '''
+
+    val_indices, holdout_indices = data_utils.stratified_split(
+        strata=binary_labels,
+        n_split=[VAL_FRACTION, 1.0 - VAL_FRACTION])
+
+    assert not (set(val_indices) & set(holdout_indices)), 'val and holdout splits overlap'
+    assert sorted(val_indices + holdout_indices) == list(range(len(image_paths))), \
+        'splits do not cover the dermnet test set'
+
+    os.makedirs(VAL_REF_DIRPATH, exist_ok=True)
+    os.makedirs(TEST_REF_DIRPATH, exist_ok=True)
+
+    for split_name, indices in [('val', val_indices), ('holdout', holdout_indices)]:
+        filepaths = SPLIT_OUTPUT_FILEPATHS[split_name]
+
+        data_utils.write_paths(filepaths['image'], [image_paths[i] for i in indices])
+        data_utils.write_paths(filepaths['binary'], [binary_labels[i] for i in indices])
+        data_utils.write_paths(filepaths['original'], [original_labels[i] for i in indices])
+
+        n_positive = sum(1 for i in indices if binary_labels[i] == '1')
+        print('Generated {} {} filepaths ({} eczema, {:.2%}) in {}'.format(
+            len(indices), split_name, n_positive, n_positive / len(indices),
+            os.path.dirname(filepaths['image'])))
 
 def setup_dataset_dermnet(root_dir, output_dir):
     '''
@@ -147,6 +205,18 @@ def setup_dataset_dermnet(root_dir, output_dir):
 
     print(f"Generated {len(test_image_paths)} testing filepaths in {TEST_REF_DIRPATH}")
 
+    write_val_holdout_split(test_image_paths, test_binary_labels, test_original_labels)
+
 if __name__ == "__main__":
-    setup_dataset_dermnet(root_dir=args.root_dir,
-                          output_dir=args.output_dir)
+    if args.splits_only:
+        # Re-deriving the split does not need any of the 15k image conversions above.
+        write_val_holdout_split(
+            data_utils.read_paths(TEST_IMAGE_OUTPUT_FILEPATH),
+            data_utils.read_paths(TEST_BINARY_LABEL_OUTPUT_FILEPATH),
+            data_utils.read_paths(TEST_ORIGINAL_LABEL_OUTPUT_FILEPATH))
+    else:
+        if args.root_dir is None or args.output_dir is None:
+            parser.error('--root_dir and --output_dir are required unless --splits_only is set')
+
+        setup_dataset_dermnet(root_dir=args.root_dir,
+                              output_dir=args.output_dir)

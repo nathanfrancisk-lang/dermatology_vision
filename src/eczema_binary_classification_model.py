@@ -4,6 +4,10 @@ import torch.nn as nn
 import numpy as np
 from torchvision import models
 
+# Channel statistics the torchvision ImageNet weights were trained under
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
 
 class EczemaBinaryClassificationModel(object):
     '''
@@ -16,6 +20,9 @@ class EczemaBinaryClassificationModel(object):
             if set, use ImageNet pretrained weights
         normalized_image_range : list[float]
             [min, max] range to normalize image intensities to
+        imagenet_normalize : bool
+            if set, additionally standardize by the ImageNet channel mean and std that the
+            pretrained backbone expects
         device : torch.device
             device to run model on
     '''
@@ -24,11 +31,13 @@ class EczemaBinaryClassificationModel(object):
                  encoder_type='resnet50',
                  pretrained=True,
                  normalized_image_range=[0, 1],
+                 imagenet_normalize=True,
                  device=torch.device('cuda')):
 
         self.encoder_type = encoder_type
         self.pretrained = pretrained
         self.normalized_image_range = normalized_image_range
+        self.imagenet_normalize = imagenet_normalize
         self.device = device
 
         # Number of output classes for binary classification
@@ -102,9 +111,15 @@ class EczemaBinaryClassificationModel(object):
         image = image / 255.0
         image = image * (high - low) + low
 
+        # Standardize to what the pretrained backbone was trained on
+        if self.imagenet_normalize:
+            mean = torch.tensor(IMAGENET_MEAN, dtype=image.dtype, device=image.device)
+            std = torch.tensor(IMAGENET_STD, dtype=image.dtype, device=image.device)
+            image = (image - mean.view(1, -1, 1, 1)) / std.view(1, -1, 1, 1)
+
         return image
 
-    def compute_loss(self, logits, labels, loss_func, class_weights=None):
+    def compute_loss(self, logits, labels, loss_func, class_weights=None, label_smoothing=0.0):
         '''
         Computes the classification loss
 
@@ -117,6 +132,10 @@ class EczemaBinaryClassificationModel(object):
                 loss function name: cross_entropy or weighted_cross_entropy
             class_weights : list[float] or None
                 class weights for weighted cross entropy
+            label_smoothing : float
+                label smoothing factor in [0, 1); caps how confident the model can become,
+                which keeps the predicted probabilities spread out enough for the
+                classification threshold to be a usable knob
         Returns:
             tuple(torch.Tensor, dict) : (scalar loss, info dict with loss breakdown)
         '''
@@ -125,9 +144,9 @@ class EczemaBinaryClassificationModel(object):
 
         if loss_func == 'weighted_cross_entropy' and class_weights is not None:
             weight = torch.tensor(class_weights, dtype=torch.float32, device=logits.device)
-            criterion = nn.CrossEntropyLoss(weight=weight)
+            criterion = nn.CrossEntropyLoss(weight=weight, label_smoothing=label_smoothing)
         else:
-            criterion = nn.CrossEntropyLoss()
+            criterion = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
         loss = criterion(logits, labels)
 
@@ -193,9 +212,13 @@ class EczemaBinaryClassificationModel(object):
 
         self.model = nn.DataParallel(self.model)
 
-    def save_model(self, path, step, optimizer):
+    def save_model(self, path, step, optimizer, preprocessing=None):
         '''
         Saves model checkpoint
+
+        The preprocessing config travels with the weights on purpose. Inference previously
+        had to re-declare the input pipeline through CLI flags, and a single missing flag
+        silently fed the model a differently-shaped distribution than it was trained on.
 
         Args:
             path : str
@@ -204,6 +227,8 @@ class EczemaBinaryClassificationModel(object):
                 current training step
             optimizer : torch.optim.Optimizer
                 optimizer whose state will be saved
+            preprocessing : dict or None
+                input pipeline settings to reproduce at inference (e.g. random_crop)
         '''
 
         checkpoint = {
@@ -211,7 +236,9 @@ class EczemaBinaryClassificationModel(object):
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'encoder_type': self.encoder_type,
-            'normalized_image_range': self.normalized_image_range
+            'normalized_image_range': self.normalized_image_range,
+            'imagenet_normalize': self.imagenet_normalize,
+            'preprocessing': preprocessing or {}
         }
 
         torch.save(checkpoint, path)
@@ -226,7 +253,7 @@ class EczemaBinaryClassificationModel(object):
             optimizer : torch.optim.Optimizer or None
                 optimizer to restore state into
         Returns:
-            int : training step from checkpoint
+            tuple(int, dict) : (training step, preprocessing settings the model was trained with)
         '''
 
         checkpoint = torch.load(path, map_location=self.device)
@@ -253,7 +280,13 @@ class EczemaBinaryClassificationModel(object):
 
         step = checkpoint.get('step', 0)
 
-        return step
+        # Adopt the normalization the checkpoint was trained under. Checkpoints written before
+        # this field existed predate ImageNet normalization, so default to off for them.
+        self.imagenet_normalize = checkpoint.get('imagenet_normalize', False)
+
+        preprocessing = checkpoint.get('preprocessing', {})
+
+        return step, preprocessing
 
     def log_summary(self,
                     summary_writer,

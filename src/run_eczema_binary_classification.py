@@ -20,6 +20,9 @@ parser.add_argument('--n_width',
     type=int, default=224, help='Image width')
 parser.add_argument('--normalized_image_range',
     nargs='+', type=float, default=[0, 1], help='Range to normalize image intensities to')
+parser.add_argument('--random_crop',
+    action='store_true', default=None,
+    help='Force aspect-preserving scale and center crop; by default follow the checkpoint')
 
 # Encoder settings
 parser.add_argument('--encoder_type',
@@ -28,6 +31,8 @@ parser.add_argument('--encoder_type',
 # Evaluation settings
 parser.add_argument('--classification_threshold',
     type=float, default=0.5, help='Probability threshold on P(eczema) for positive prediction; lower favors recall')
+parser.add_argument('--threshold_path',
+    type=str, default=None, help='Path to threshold.txt written by training; overrides --classification_threshold')
 
 # Output settings
 parser.add_argument('--output_path',
@@ -52,10 +57,12 @@ if __name__ == '__main__':
         n_height=args.n_height,
         n_width=args.n_width,
         normalized_image_range=args.normalized_image_range,
+        random_crop=args.random_crop,
         # Encoder settings
         encoder_type=args.encoder_type,
         # Evaluation settings
         classification_threshold=args.classification_threshold,
+        threshold_path=args.threshold_path,
         # Output settings
         output_path=args.output_path,
         save_outputs=args.save_outputs,

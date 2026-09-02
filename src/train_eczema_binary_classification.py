@@ -44,6 +44,8 @@ parser.add_argument('--encoder_type',
     type=str, default='resnet50', help='Encoder backbone: resnet18, resnet34, resnet50')
 parser.add_argument('--pretrained',
     action='store_true', help='Use ImageNet pretrained weights')
+parser.add_argument('--no_imagenet_normalize',
+    action='store_true', help='Skip ImageNet mean/std standardization of inputs')
 
 # Training settings
 parser.add_argument('--balance_sampler',
@@ -70,10 +72,14 @@ parser.add_argument('--loss_func',
     type=str, default='cross_entropy', help='Loss function: cross_entropy, weighted_cross_entropy')
 parser.add_argument('--loss_class_weights',
     nargs='+', type=float, default=None, help='Class weights for weighted cross entropy')
+parser.add_argument('--label_smoothing',
+    type=float, default=0.0, help='Label smoothing factor in [0, 1); counters overconfidence')
 
 # Evaluation settings
 parser.add_argument('--classification_threshold',
     type=float, default=0.5, help='Probability threshold on P(eczema) for positive prediction; lower favors recall')
+parser.add_argument('--target_sensitivity',
+    type=float, default=0.9, help='Target eczema sensitivity; selects checkpoints and calibrates the saved threshold')
 
 # Checkpoint and summary settings
 parser.add_argument('--checkpoint_dirpath',
@@ -86,6 +92,8 @@ parser.add_argument('--n_display',
     type=int, default=5, help='Number of display samples per summary')
 parser.add_argument('--start_step_validation',
     type=int, default=0, help='Step to start running validation')
+parser.add_argument('--early_stop_patience',
+    type=int, default=0, help='Stop after this many validations without improvement; 0 disables')
 parser.add_argument('--restore_path',
     type=str, default=None, help='Path to restore model checkpoint from')
 
@@ -118,6 +126,7 @@ if __name__ == '__main__':
           # Encoder settings
           encoder_type=args.encoder_type,
           pretrained=args.pretrained,
+          imagenet_normalize=not args.no_imagenet_normalize,
           # Training settings
           balance_sampler=args.balance_sampler,
           learning_rates=args.learning_rates,
@@ -131,14 +140,17 @@ if __name__ == '__main__':
           # Loss settings
           loss_func_name=args.loss_func,
           loss_class_weights=args.loss_class_weights,
+          label_smoothing=args.label_smoothing,
           # Evaluation settings
           classification_threshold=args.classification_threshold,
+          target_sensitivity=args.target_sensitivity,
           # Checkpoint settings
           checkpoint_dirpath=args.checkpoint_dirpath,
           n_step_per_checkpoint=args.n_step_per_checkpoint,
           n_step_per_summary=args.n_step_per_summary,
           n_display=args.n_display,
           start_step_validation=args.start_step_validation,
+          early_stop_patience=args.early_stop_patience,
           restore_path=args.restore_path,
           # Hardware settings
           device=args.device,

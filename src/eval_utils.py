@@ -5,8 +5,12 @@ from sklearn.metrics import (
     recall_score,
     f1_score,
     roc_auc_score,
+    roc_curve,
     confusion_matrix as sk_confusion_matrix
 )
+
+# Index of the eczema class in the per-class metric arrays
+POSITIVE_CLASS = 1
 
 
 def compute_accuracy(predictions, labels):
@@ -144,6 +148,83 @@ def compute_auc_roc(probabilities, labels):
         return -1.0
 
     return roc_auc_score(labels, probabilities)
+
+
+def specificity_at_sensitivity(probabilities, labels, target_sensitivity):
+    '''
+    Finds the operating point achieving at least the target sensitivity on the eczema class
+
+    Walks the ROC curve and returns the point with the highest specificity among those meeting
+    the target. Independent of any fixed classification threshold, so it can be used both to
+    rank checkpoints and to pick the deployment threshold.
+
+    Args:
+        probabilities : numpy[float]
+            predicted probabilities for the positive class
+        labels : numpy[int]
+            ground truth class labels (0 or 1)
+        target_sensitivity : float
+            desired recall on the positive class, in [0, 1]
+    Returns:
+        tuple(float, float) : (specificity at that point, threshold achieving it)
+            returns (0.0, 0.0) if the target is unreachable or only one class is present
+    '''
+
+    if len(np.unique(labels)) < 2:
+        return 0.0, 0.0
+
+    false_positive_rate, true_positive_rate, thresholds = roc_curve(labels, probabilities)
+
+    # Points meeting the target sensitivity; roc_curve is sorted by decreasing threshold so
+    # the first qualifying point is also the highest-specificity one
+    (qualifying,) = np.where(true_positive_rate >= target_sensitivity)
+
+    if len(qualifying) == 0:
+        return 0.0, 0.0
+
+    index = qualifying[0]
+
+    return float(1.0 - false_positive_rate[index]), float(thresholds[index])
+
+
+def format_results(results, loss=None):
+    '''
+    Formats a results dict into log lines
+
+    Positive-class (eczema) metrics are reported first because they are what the model is
+    actually being tuned for. The macro averages are kept but labeled, since on a ~90% negative
+    dataset they read far more favourably than the eczema numbers and are easy to mistake for
+    them.
+
+    Args:
+        results : dict
+            output of evaluate()
+        loss : float or None
+            if given, logged above the metrics
+    Returns:
+        list[str] : lines to log
+    '''
+
+    lines = []
+
+    if loss is not None:
+        lines.append('  Loss:                  {:.5f}'.format(loss))
+
+    lines.extend([
+        '  Sensitivity (eczema):  {:.5f}'.format(results['recall_per_class'][POSITIVE_CLASS]),
+        '  Precision   (eczema):  {:.5f}'.format(results['precision_per_class'][POSITIVE_CLASS]),
+        '  F1          (eczema):  {:.5f}'.format(results['f1_per_class'][POSITIVE_CLASS]),
+        '  Specificity:           {:.5f}'.format(results['specificity']),
+        '  AUC-ROC:               {:.5f}'.format(results['auc_roc']),
+        '  Accuracy:              {:.5f}'.format(results['accuracy']),
+        '  Recall (macro):        {:.5f}'.format(results['recall_macro']),
+        '  Precision (macro):     {:.5f}'.format(results['precision_macro']),
+        '  F1 (macro):            {:.5f}'.format(results['f1_macro']),
+        '  TP: {}  FP: {}  TN: {}  FN: {}'.format(
+            results['tp'], results['fp'], results['tn'], results['fn']),
+    ])
+
+    return lines
 
 
 def compute_confusion_matrix(predictions, labels):
